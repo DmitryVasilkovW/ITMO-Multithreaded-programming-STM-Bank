@@ -2,7 +2,7 @@ import kotlinx.atomicfu.*
 
 /*
    Lock-free STM implementation.
-   @author :TODO: LastName FirstName
+   @author Vasilkov Dmitry
 */
 
 /**
@@ -40,12 +40,26 @@ class TxVar<T>(initial: T)  {
      * updating function [update] to it. Returns the updated value.
      */
     fun openIn(tx: Transaction, update: (T) -> T): T {
-        // todo: FIXME: this implementation does not actually implement transactional update
         while (true) {
             val curLoc = loc.value
-            val curValue = curLoc.oldValue
-            val updValue = update(curValue)
-            if (loc.compareAndSet(curLoc, Loc(updValue, updValue, tx))) return updValue
+            val currentValue = curLoc.valueIn(tx) {
+                it.abort()
+            }
+
+            if (currentValue == null) {
+                continue
+            }
+
+            val updatedValue = update(currentValue)
+            val updatedLoc = Loc(currentValue, updatedValue, tx)
+
+            if (loc.compareAndSet(curLoc, updatedLoc)) {
+                if (tx.status == TxStatus.ABORTED) {
+                    throw AbortException
+                }
+
+                return updatedValue
+            }
         }
     }
 }
@@ -57,7 +71,37 @@ private class Loc<T>(
     val oldValue: T,
     val newValue: T,
     val owner: Transaction
-)
+) {
+
+    fun valueIn(tx: Transaction, onActive: (Transaction) -> Unit): T? {
+        return when {
+            isOwner(tx) -> newValue
+            isAborted() -> oldValue
+            isCommitted() -> newValue
+            isActive() -> {
+                onActive(owner)
+                null
+            }
+            else -> null
+        }
+    }
+
+    private fun isOwner(tx: Transaction): Boolean {
+        return owner == tx
+    }
+
+    private fun isAborted(): Boolean {
+        return owner.status == TxStatus.ABORTED
+    }
+
+    private fun isCommitted(): Boolean {
+        return owner.status == TxStatus.COMMITTED
+    }
+
+    private fun isActive(): Boolean {
+        return owner.status == TxStatus.ACTIVE
+    }
+}
 
 private val rootTx = Transaction().apply { commit() }
 
@@ -88,5 +132,6 @@ class Transaction : TxScope() {
  * This exception is thrown when transaction is aborted.
  */
 private object AbortException : Exception() {
+    private fun readResolve(): Any = AbortException
     override fun fillInStackTrace(): Throwable = this
 }
